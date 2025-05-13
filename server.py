@@ -1,18 +1,19 @@
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
 import uuid
-import os
+import os # Still needed for os.environ.get('PORT', ...)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_secure_default_secret_key_123!')
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+# HARDCODED SECRET KEY - Change this to your own random string if you want
+# For personal use, this is simpler than environment variables.
+# If this code is ever shared or made public, this key is exposed.
+app.config['SECRET_KEY'] = 'this_is_my_personal_super_secret_key_for_geotrails_12345!' 
+socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*") # Keeping CORS open for personal use
 
-active_users = {}  # Stores {user_id: {"lat": float, "lon": float, "trail": list}}
-# No need for socket_to_user anymore, as user_id will BE the request.sid
+active_users = {}
+MAX_TRAIL_LENGTH = 30
 
-MAX_TRAIL_LENGTH = 30 # Increased trail length slightly
-
-print("Flask-SocketIO Server instance created and configured.")
+print("Flask-SocketIO Server instance created and configured (hardcoded secret).")
 
 @app.route('/')
 def index():
@@ -20,26 +21,21 @@ def index():
 
 @socketio.on('connect')
 def handle_connect():
-    user_id = request.sid # Use the socket's unique session ID as the user_id
+    user_id = request.sid
     
     if user_id not in active_users:
         active_users[user_id] = {"lat": None, "lon": None, "trail": []}
     
-    print(f"Client connected: user_id (socket_id) = {user_id}")
+    # print(f"Client connected: user_id (socket_id) = {user_id}")
     
-    # Send this new user their ID and the current state of all other users
     emit('user_connected_self', {'id': user_id, 'all_users': active_users})
-    
-    # Notify all *other* clients that a new user has connected (they will update their maps)
-    # We send the complete active_users list so they can add the new one
     emit('all_users_update', active_users, broadcast=True, skip_sid=user_id)
 
 @socketio.on('location_update')
 def handle_location_update(data):
-    user_id = request.sid # Identify user by their socket ID
+    user_id = request.sid
 
-    if not user_id: # Should not happen if client is connected
-        print(f"Location update from unknown socket data: {data}")
+    if not user_id:
         return
 
     lat = data.get('lat')
@@ -54,26 +50,23 @@ def handle_location_update(data):
             active_users[user_id]['trail'].pop(0)
 
         update_data = {'id': user_id, 'lat': lat, 'lon': lon, 'trail': active_users[user_id]['trail']}
-        # Broadcast to everyone EXCEPT the sender
         emit('user_moved', update_data, broadcast=True, skip_sid=user_id) 
-    else:
-        print(f"Invalid location update for user {user_id} or user not in active_users: {data}")
+    # else:
+        # print(f"Invalid location update for user {user_id} or user not in active_users: {data}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    user_id = request.sid # Identify user by their socket ID
+    user_id = request.sid
     
     if user_id in active_users:
         del active_users[user_id]
         emit('user_left', {'id': user_id}, broadcast=True)
-        print(f"Client {user_id} disconnected and removed.")
-    else:
-        print(f"Socket {user_id} disconnected, but user was not in active_users list.")
+        # print(f"Client {user_id} disconnected and removed.")
+    # else:
+        # print(f"Socket {user_id} disconnected, but user was not in active_users list.")
 
 if __name__ == '__main__':
-    print("Attempting to start Flask-SocketIO server locally...")
-    port = int(os.environ.get('PORT', 5000))
-    print(f"Server will listen on host 0.0.0.0, port {port}")
-    # For local development, use_reloader can be True, but for Gunicorn/production it's often not needed or problematic.
-    # debug=True should also be False in production.
+    # print("Attempting to start Flask-SocketIO server locally...")
+    port = int(os.environ.get('PORT', 5000)) # Still keep this for Render/PaaS compatibility
+    # print(f"Server will listen on host 0.0.0.0, port {port}")
     socketio.run(app, host='0.0.0.0', port=port, debug=True, use_reloader=True)

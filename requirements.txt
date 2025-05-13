@@ -1,0 +1,5 @@
+Flask
+Flask-SocketIO
+eventlet  # Or gevent, depending on what you chose for async_mode
+gunicorn  # A common production WSGI server Render might use
+uuid      # (uuid is standard library, but good to list explicit deps)

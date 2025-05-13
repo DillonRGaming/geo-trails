@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live User Map v2</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; color: #333; }
+        #header { background-color: #333; color: white; padding: 15px 0; text-align: center; }
+        #header h1 { margin: 0; font-size: 1.8em; }
+        #map-container { display: flex; justify-content: center; padding: 20px; }
+        #map { 
+            height: 75vh; 
+            width: 90%; 
+            max-width: 1200px; 
+            border: 2px solid #bbb; 
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .leaflet-popup-content-wrapper { border-radius: 5px; }
+        .leaflet-popup-content { font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>Real-Time User Map</h1>
+    </div>
+    <div id="map-container">
+        <div id="map"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script> <!-- Updated Socket.IO Client -->
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const map = L.map('map', {
+                // attributionControl: false // Optionally hide default Leaflet attribution if too cluttered
+            }).setView([20, 0], 2); // Start with a global view
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 18, // Slightly reduced maxZoom
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // L.control.attribution({position: 'bottomleft'}).addTo(map); // Add it back if you hid it
+
+            const socket = io(); // Connects to the server that served this page
+            let myUserId = null;
+            let userMarkers = {}; // { userId: L.CircleMarker }
+            let userTrails = {};  // { userId: L.Polyline }
+
+            // --- Socket Event Handlers ---
+            socket.on('connect', () => {
+                console.log('Socket.IO: Connected to server with socket ID:', socket.id);
+                // The server will now send 'user_connected_self' with our ID
+            });
+
+            socket.on('user_connected_self', (data) => {
+                // data = {id: your_assigned_user_id (which is socket.id), all_users: {...}}
+                console.log('Socket.IO: Received self connection data:', data);
+                if (data.id) {
+                    myUserId = data.id;
+                    console.log('Socket.IO: My user ID is set to:', myUserId);
+                }
+                updateAllUserVisuals(data.all_users || {});
+                startGeolocation(); // Start geolocation after we know our ID
+            });
+            
+            socket.on('all_users_update', (allServerUsers) => {
+                console.log('Socket.IO: Received full user update:', allServerUsers);
+                updateAllUserVisuals(allServerUsers || {});
+            });
+
+            socket.on('user_moved', (data) => {
+                // data = {id: userId, lat: ..., lon: ..., trail: [...]}
+                if (data.id === myUserId) return; // My own moves are handled by local geolocation
+                // console.log('Socket.IO: User moved:', data.id);
+                updateUserVisual(data.id, data.lat, data.lon, data.trail || [], false);
+            });
+
+            socket.on('user_left', (data) => {
+                // data = {id: userId}
+                console.log('Socket.IO: User left:', data.id);
+                if (userMarkers[data.id]) {
+                    map.removeLayer(userMarkers[data.id]);
+                    delete userMarkers[data.id];
+                }
+                if (userTrails[data.id]) {
+                    map.removeLayer(userTrails[data.id]);
+                    delete userTrails[data.id];
+                }
+            });
+
+            socket.on('disconnect', () => {
+                console.warn('Socket.IO: Disconnected from server.');
+                // Optionally, could try to grey out other markers or show a disconnected status
+            });
+
+            // --- Map Update Functions ---
+            function updateAllUserVisuals(allUsersData) {
+                const currentClientUserIds = Object.keys(userMarkers);
+                const serverUserIds = Object.keys(allUsersData);
+
+                // Remove users that are no longer sent by the server (except self)
+                currentClientUserIds.forEach(existingUserId => {
+                    if (existingUserId !== myUserId && !serverUserIds.includes(existingUserId)) {
+                        if (userMarkers[existingUserId]) map.removeLayer(userMarkers[existingUserId]);
+                        if (userTrails[existingUserId]) map.removeLayer(userTrails[existingUserId]);
+                        delete userMarkers[existingUserId];
+                        delete userTrails[existingUserId];
+                    }
+                });
+
+                // Add or update users from server data
+                serverUserIds.forEach(userId => {
+                    const userData = allUsersData[userId];
+                    if (userData && userData.lat !== null && userData.lon !== null) {
+                        const isSelf = (userId === myUserId);
+                        // Only update self from server if it's the initial load and geolocation hasn't kicked in yet
+                        // Or if geolocation is not available for some reason for the self-user
+                        if (!isSelf || (isSelf && !userMarkers[myUserId])) { 
+                             updateUserVisual(userId, userData.lat, userData.lon, userData.trail || [], isSelf);
+                        }
+                    }
+                });
+            }
+
+            function updateUserVisual(userId, lat, lon, trailData, isSelf) {
+                const trailPoints = trailData.map(p => [p.lat, p.lon]);
+                const userColor = isSelf ? 'hsl(210, 100%, 55%)' : 'hsl(0, 90%, 55%)'; // Blue for self, Red for others
+                const trailColor = isSelf ? 'hsl(210, 80%, 65%)' : 'hsl(0, 70%, 65%)';
+
+                // Update Marker
+                if (userMarkers[userId]) {
+                    userMarkers[userId].setLatLng([lat, lon]);
+                } else {
+                    userMarkers[userId] = L.circleMarker([lat, lon], {
+                        radius: 7,
+                        fillColor: userColor,
+                        color: "#222", // Darker border for marker
+                        weight: 1.5,
+                        opacity: 1,
+                        fillOpacity: 0.9
+                    }).addTo(map);
+                    userMarkers[userId].bindPopup(isSelf ? "<strong>You are here!</strong>" : `User: ${userId.substring(0, 6)}...`);
+                    if (isSelf) {
+                        userMarkers[userId].openPopup();
+                    }
+                }
+
+                // Update Trail
+                if (userTrails[userId]) {
+                    if (trailPoints.length > 0) {
+                        userTrails[userId].setLatLngs(trailPoints);
+                    } else { // If trail becomes empty, remove it
+                        map.removeLayer(userTrails[userId]);
+                        delete userTrails[userId];
+                    }
+                } else {
+                    if (trailPoints.length > 1) { // Only draw trail if there's more than one point
+                        userTrails[userId] = L.polyline(trailPoints, { 
+                            color: trailColor, 
+                            weight: 4, 
+                            opacity: 0.65 
+                        }).addTo(map);
+                    }
+                }
+            }
+
+            // --- Geolocation ---
+            let watchId = null;
+            function startGeolocation() {
+                if (navigator.geolocation) {
+                    if (watchId) navigator.geolocation.clearWatch(watchId); // Clear previous watch if any
+
+                    watchId = navigator.geolocation.watchPosition(
+                        (position) => {
+                            const lat = position.coords.latitude;
+                            const lon = position.coords.longitude;
+                            
+                            if (myUserId) { // Ensure we have our ID before sending updates
+                                socket.emit('location_update', { lat: lat, lon: lon }); // Server knows our ID from socket.sid
+                                updateUserVisual(myUserId, lat, lon, [], true); // Update self locally, trail is managed by server response
+                            }
+
+                            // Center map on self only if it's the first time or user is actively viewing
+                            if (document.hidden === false && (!map.getBounds().contains([lat, lon]) || map.getZoom() < 13) ) {
+                                 map.setView([lat, lon], Math.max(map.getZoom(), 15) ); 
+                            }
+                        },
+                        (error) => { 
+                            console.warn(`Geolocation error: ${error.message}. Code: ${error.code}`);
+                            // Handle common errors like permission denied (1), position unavailable (2), timeout (3)
+                        },
+                        { enableHighAccuracy: true, timeout: 8000, maximumAge: 2000 } // Tuned options
+                    );
+                } else {
+                    console.log("Geolocation is not supported by this browser.");
+                    // Maybe display a message to the user on the page
+                }
+            }
+            
+            // Call startGeolocation after initial connection and ID assignment
+            // This is now called within the 'user_connected_self' handler.
+
+            // Cleanup
+            window.addEventListener('beforeunload', () => {
+                if (watchId && navigator.geolocation) {
+                    navigator.geolocation.clearWatch(watchId);
+                }
+                if (socket) {
+                    socket.disconnect(); // Gracefully disconnect socket
+                }
+            });
+        });
+    </script>
+</body>
+</html>
